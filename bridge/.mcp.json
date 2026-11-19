@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "tidify-bridge": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["src/index.ts"]
+    }
+  }
+}

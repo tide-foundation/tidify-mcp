@@ -1,0 +1,26 @@
+{
+  // Type-checks everything (src + test). `npm run build` uses tsconfig.build.json to emit src only.
+  "compilerOptions": {
+    // Node 22+: native ESM, ES2024 runtime features.
+    "target": "es2024",
+    "module": "nodenext",
+    "types": ["node"],
+
+    // Source files import each other with `.ts` extensions so `node src/index.ts` runs them
+    // directly (Node's built-in type stripping). tsc rewrites them to `.js` when it emits.
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    // Only syntax Node can strip: no enums, namespaces or constructor parameter properties.
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+
+    "noEmit": true
+  },
+  "include": ["src", "test"]
+}
