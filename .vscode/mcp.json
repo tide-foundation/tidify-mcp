@@ -4,6 +4,16 @@
       "type": "stdio",
       "command": "dotnet",
       "args": ["run", "--project", "${workspaceFolder}/src/Asgard.Mcp"]
+    },
+    "tidify-bridge": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${workspaceFolder}/bridge/src/index.ts"],
+      "env": {
+        "TIDECLOAK_URL": "http://localhost:8080",
+        "TIDECLOAK_REALM": "a",
+        "TIDECLOAK_CLIENT_ID": "browser_login"
+      }
     }
   }
 }

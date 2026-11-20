@@ -3,7 +3,7 @@ import z from 'zod';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { openInBrowser } from '../browser.ts';
-import { ensureServerReady } from '../asgard-server-setup.ts';
+import { getVaultState, VaultState } from '../vault-management/vault-state.ts';
 
 const url = process.env.TIDECLOAK_URL ?? 'http://localhost:8080';
 const realm = process.env.TIDECLOAK_REALM ?? 'a';
@@ -18,7 +18,19 @@ export function registerLoginTool(server: McpServer): void {
             annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
         },
         async (ctx) => {
-            if (!ensureServerReady()) throw new Error('The Asgard proxy is still starting. Try again in a few seconds.');
+            const state = getVaultState();
+            if (state === VaultState.NotRunning) throw new Error('The Asgard proxy is still starting. Try again in a few seconds.');
+
+            switch(state){
+                case VaultState.AdaptorRequired:
+                    break;
+                case VaultState.CertificateApprovalRequired:
+                    break;
+                case VaultState.Running:
+                    break;
+                default:
+                    throw new Error("Unhandled state type: " + state);
+            }
 
             try {
                 const page = new URL(`http://127.0.0.1:${18433}/`);
