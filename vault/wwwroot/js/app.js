@@ -1,62 +1,110 @@
-import { TideCloak } from 'https://esm.sh/@tidecloak/js@0.14.41';
+import { IAMService } from 'https://esm.sh/@tidecloak/js@0.14.46';
 
-// Tidecloak settings come from the page URL, e.g. /?url=http://localhost:8080&realm=a&clientId=browser-login-page
 const params = new URLSearchParams(location.search);
 const config = {
-	url: params.get('url')?.replace(/\/+$/, ''), // tidecloak-js appends /realms/..., so no trailing slash
+	url: params.get('url')?.replace(/\/+$/, ''), // the admin API URLs below append /admin/..., so no trailing slash
 	realm: params.get('realm'),
 	clientId: params.get('clientId'),
-	fetchAdaptorForServer: params.get('fetchAdaptor') === 'true'
+	fetchAdaptorForServer: params.get('fetchAdaptor') === 'true',
+	provideDelegation: params.get('provideDelegation') === 'true',
+	loginAdaptor: params.get('loginAdaptor')
 };
 const status = document.getElementById('status');
 
-const tidecloak = new TideCloak({ url: config.url, realm: config.realm, clientId: config.clientId });
+// The progress circles in index.html. Only the steps this visit will run are shown.
+const stepItem = name => document.querySelector(`#steps [data-step="${name}"]`);
+const setStep = (state, ...names) => names.forEach(name => stepItem(name).className = state);
+stepItem('adaptors').hidden = !config.fetchAdaptorForServer;
+stepItem('enclave').hidden = stepItem('delegation').hidden = !config.provideDelegation;
 
-// First visit: redirects to the Tidecloak sign-in page. When Tidecloak redirects back here, this resolves.
-tidecloak
-	.init({
+// The browser client's adapter config: the one the bridge saved from an earlier sign-in (JSON, then base64url),
+// or before that, the same three fields from the URL. IAMService maps it onto TideCloak's options itself.
+const loginAdaptor = config.loginAdaptor
+	? JSON.parse(new TextDecoder().decode(Uint8Array.fromBase64(config.loginAdaptor, { alphabet: 'base64url' })))
+	: { 'auth-server-url': config.url, realm: config.realm, resource: config.clientId };
+// for the admin API URLs below: an adapter's auth-server-url usually ends in a slash
+const authServerUrl = loginAdaptor['auth-server-url'].replace(/\/+$/, '');
+
+IAMService
+	.init(loginAdaptor, {
 		onLoad: 'login-required',
 		checkLoginIframe: false,
-		pkceMethod: 'S256',
-		// Keeps the query string, so the settings are still in the URL when Tidecloak redirects back.
-		// Tidecloak returns its result in the #fragment, which tidecloak-js removes afterwards.
 		redirectUri: `${location.origin}${location.pathname}${location.search}`,
-		useDPoP: {
+		dpopConfig: {
 			mode: 'auto'
 		}
 	})
-	.then(() => {
-		status.textContent = `Signed in as ${tidecloak.token}.`;
-		if(config.fetchAdaptorForServer){
-			// secureFetch turns our Bearer token into DPoP + a proof when DPoP is on, and sends it as is when it's off.
-			const result = document.body.appendChild(document.createElement('pre'));
-			tidecloak.secureFetch(
-				`${config.url}/admin/realms/${config.realm}/vendorResources/get-installations-provider?clientId=${encodeURIComponent("asgard-mcp-vault")}&providerId=keycloak-oidc-keycloak-json`,
-				{ headers: { Authorization: `Bearer ${tidecloak.token}` } }
-			)
-				.then(async response => {
-					// Error statuses (401, 403, ...) land here too: fetch only rejects when no response arrives.
-					if (response.status === 403) {
-						// Signed in, but the token lacks the role/permission this endpoint needs.
-						result.textContent = `403 Forbidden: the signed-in user isn't allowed to call this endpoint.\n${await response.text()}`;
-						return;
-					}
-					const text = await response.text();
-					result.textContent = `${response.status} ${response.statusText}\n${text}`;
-					if (response.ok) {
-						const data = btoa(String.fromCharCode(...new TextEncoder().encode(text)));
-						await fetch(`/adaptor?data=${encodeURIComponent(data)}`);
-					}
-				})
-				.catch(error => {
-					// No response at all: network error, or blocked by CORS.
-					result.textContent = `Fetch failed: ${error instanceof Error ? error.message : JSON.stringify(error)}`;
+	.then(async () => {
+		try{
+
+			if(config.fetchAdaptorForServer){
+				setStep('active', 'adaptors');
+				// IAMService.fetch turns our Bearer token into DPoP + a proof when DPoP is on, and sends it as is when it's off.
+				const result = document.body.appendChild(document.createElement('pre'));
+				const pre_vaultResp = IAMService.fetch(
+					`${authServerUrl}/admin/realms/${loginAdaptor.realm}/vendorResources/get-installations-provider?clientId=${encodeURIComponent("asgard-mcp-vault")}&providerId=keycloak-oidc-keycloak-json`,
+					{ headers: { Authorization: `Bearer ${IAMService.getToken()}` } }
+				);
+				const pre_bridgeResp = IAMService.fetch(
+					`${authServerUrl}/admin/realms/${loginAdaptor.realm}/vendorResources/get-installations-provider?clientId=${encodeURIComponent(loginAdaptor.resource)}&providerId=keycloak-oidc-keycloak-json`,
+					{ headers: { Authorization: `Bearer ${IAMService.getToken()}` } }
+				);
+				const vaultResp = await pre_vaultResp;
+				const bridgeResp = await pre_bridgeResp;
+				if (vaultResp.status === 403 || bridgeResp.status === 403) {
+					// Signed in, but the token lacks the role/permission this endpoint needs.
+					result.textContent = `403 Forbidden: the signed-in user isn't allowed to call this endpoint.\n${await response.text()}`;
+					return;
+				}
+				if(!vaultResp.ok || !bridgeResp.ok){
+					// Any other failure (401, 404, 500, ...): show both, since either one may be the cause.
+					result.textContent =
+						`asgard-mcp-vault: ${vaultResp.status} ${vaultResp.statusText}\n${await vaultResp.text()}\n\n` +
+						`${loginAdaptor.resource}: ${bridgeResp.status} ${bridgeResp.statusText}\n${await bridgeResp.text()}`;
+					return;
+				}
+				const vaultAdaptor = await vaultResp.json();
+				const bridgeAdaptor = await bridgeResp.json();
+
+				const saved = await fetch('/Provide/Adaptor', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ vault: vaultAdaptor, bridge: bridgeAdaptor })
 				});
+				// fetch resolves on error statuses too (409, 400, ...), so check before carrying on
+				if (!saved.ok) {
+					status.textContent = `Saving the adapter configs failed: ${saved.status} ${await saved.text()}`;
+					return;
+				}
+				setStep('done', 'adaptors');
+			}
+
+			if(config.provideDelegation){
+				// One request does both: tidecloak-js opens the enclave inside it, when the vault asks for a
+				// Tide-signed delegation, and IAMService has no hook for that moment. So they spin together.
+				setStep('active', 'enclave', 'delegation');
+				const delegation = await IAMService.fetch(
+					// absolute: the DPoP proof runs new URL() on it, which throws on a relative path
+					`${location.origin}/Provide/Delegation`,
+					{ headers: { Authorization: `Bearer ${IAMService.getToken()}` } }
+				);
+				if (!delegation.ok) {
+					status.textContent = `Delegation failed: ${delegation.status} ${delegation.statusText}`;
+					return;
+				}
+				setStep('done', 'enclave', 'delegation');
+			}
+
+			status.textContent = 'Done. You can close this tab.';
+			//window.close(); // usually ignored (the tab wasn't opened by a script), so the message above is what the user sees
+		}catch(error){
+			status.textContent = `Error: ${error instanceof Error ? error.message : JSON.stringify(error)}`;
+		}finally{
+			// Each step is marked done once it succeeds, so one still spinning here was cut short by an error.
+			document.querySelectorAll('#steps .active').forEach(item => item.className = 'failed');
 		}
 	})
 	.catch(error => {
+		// A failed init also drops IAMService's TideCloak instance, so getToken() would throw from here on.
 		status.textContent = `Sign-in failed: ${error instanceof Error ? error.message : JSON.stringify(error)}`;
-	})
-	.finally(() => {
-		console.log(tidecloak.token);
 	});

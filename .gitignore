@@ -488,3 +488,4 @@ vault/appsettings.json
 # Certificates and private keys
 *.crt
 *.key
+*.csr

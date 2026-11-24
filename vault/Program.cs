@@ -8,23 +8,40 @@ using Tide.Asgard.AspNetCore.Authentication.TokenExchange;
 
 var builder = WebApplication.CreateBuilder(args);
 
+var status = new VaultStatusProvider(VaultStatus.AdaptorRequired);
 
-var vendorId = builder.Configuration["Keycloak:realm"]
-	?? throw new InvalidOperationException("No Keycloak realm configuration found.");
-
-// the public client the browser logs in with, e.g. dotnet run -- --BrowserClientId=browser-login-page
-var browserClientId = builder.Configuration["BrowserClientId"]
-	?? throw new InvalidOperationException("Missing the browser client id. Pass it as --BrowserClientId=<client id>.");
-
-
-var status = VaultStatus.AdaptorRequired;
+var vendorId = builder.Configuration["Keycloak:realm"] ?? throw new InvalidOperationException("No Keycloak realm configuration found.");
+var browserClientId = builder.Configuration["BrowserClientId"] ?? throw new InvalidOperationException("Missing the browser client id. Pass it as --BrowserClientId=<client id>.");
 
 builder.Services.AddControllers();
+
 if (builder.Configuration.GetSection("Keycloak:jwk").Exists())
 {
+	var pendingRequest = builder.Configuration["Asgard:certificate_request_path"] ?? "./resource.csr";
+	status.Current = File.Exists(pendingRequest) ? VaultStatus.CertificateApprovalRequired : VaultStatus.Running;
+
 	builder.AddAsgard(options => options.RequireHttpsMetadata = false) // local server
- 		.RequireTokenBinding(options => options.SupportBindings = Binding.DPoP); // accepts DPoP-bound user tokens, and creates + enrolls this backend's mTLS keys
+ 		.RequireTokenBinding(options => options.SupportBindings = Binding.DPoP) // accepts DPoP-bound user tokens, and creates + enrolls this backend's mTLS keys
+		.OnEvent(AsgardEvent.CertificateRequested, _ => SetStatus(VaultStatus.CertificateApprovalRequired))
+		.OnEvent(AsgardEvent.CertificateApproved, _ => SetStatus(VaultStatus.Running))
+		.OnEvent(AsgardEvent.CertificateRequestedError, StopOnError)
+		.OnEvent(AsgardEvent.CertificateFetchError, StopOnError);
 }
+
+Task SetStatus(VaultStatus next)
+{
+	status.Current = next;
+	return Task.CompletedTask;
+}
+static Task StopOnError(AsgardEventContext context)
+{
+	Console.Error.WriteLine($"Asgard raised {context.Event}, stopping the vault: {context.Exception}");
+	Environment.ExitCode = 1;
+	context.Services.GetRequiredService<IHostApplicationLifetime>().StopApplication();
+	return Task.CompletedTask;
+}
+
+builder.Services.AddSingleton(status); // the same instance as the local `status`
 
 builder.Services.AddProblemDetails(); // required by UseExceptionHandler
 
@@ -38,45 +55,55 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 
-string? adaptor = null;
-app.MapGet("/adaptor", (string data) =>
+app.Lifetime.ApplicationStarted.Register(status.StartAnnouncing);
+
+var stopping = app.Lifetime.ApplicationStopping; // read before Run: Run disposes the host before it throws
+try
 {
-	JsonNode? keycloak;
-	try
+	app.Run("http://127.0.0.1:18433");
+}
+// An error event in Asgard's first enrollment attempt stops the app before Kestrel has bound the port, which
+// cancels Kestrel's start and makes Run throw. StopOnError already printed why and set the exit code.
+catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
+
+
+[Route("Provide")]
+public class ExchangeController(IWebHostEnvironment environment, IHostApplicationLifetime lifetime, VaultStatusProvider status) : ControllerBase
+{
+	// exchanges the user's token with TideCloak over mTLS - the new token is bound to this backend's certificate (cnf.x5t#S256)
+	[Authorize]
+	[RequireExchangeApproval(ApprovalRequirement.TideEnabled)]
+	[HttpGet("Delegation")]
+	public IActionResult Get() => Ok("Thanks for the delegation :)");
+
+	// Saves the two adapter configs the sign-in page fetched (the JSON request body) into appsettings.json:
+	// the vault's own client under "Keycloak", and the browser client the bridge logs in with under "BrowserClient".
+	[HttpPost("Adaptor")]
+	public IActionResult Adaptor([FromBody] AdaptorConfigs? configs)
 	{
-		adaptor = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(data));
-		keycloak = JsonNode.Parse(adaptor);
+		// Once the vault has a config, refuse to replace it: that would re-point its trusted server and keys.
+		var current = status.Current;
+		if (current != VaultStatus.AdaptorRequired) return Conflict($"The vault already has its adapter config (status: {current}).");
+
+		// configs is null when the body is empty or isn't JSON; a property is null when it's missing or isn't an object
+		if (configs?.Vault is null || configs.Bridge is null)
+			return BadRequest("The body must be { \"vault\": {...}, \"bridge\": {...} }, both adapter configs as JSON objects.");
+		// Not the whole config: the vault's holds the one-time enrollment_token.
+		Console.WriteLine($"Saved the adapter configs for clients '{configs.Vault["resource"]}' and '{configs.Bridge["resource"]}' in realm '{configs.Vault["realm"]}'.");
+
+		var path = Path.Combine(environment.ContentRootPath, "appsettings.json");
+		var settings = System.IO.File.Exists(path) ? JsonNode.Parse(System.IO.File.ReadAllText(path))!.AsObject() : new JsonObject();
+		settings["Keycloak"] = configs.Vault;
+		settings["BrowserClient"] = configs.Bridge;
+		System.IO.File.WriteAllText(path, settings.ToJsonString(new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
+
+		// Exit code 3 asks the bridge to restart us, so the new config is loaded. Graceful shutdown
+		// finishes this response first.
+		Environment.ExitCode = 3;
+		lifetime.StopApplication();
+		return Ok();
 	}
-	catch (Exception e) when (e is FormatException or JsonException) { return Results.BadRequest("data must be base64-encoded JSON."); }
-	Console.WriteLine(adaptor);
+}
 
-	var path = Path.Combine(app.Environment.ContentRootPath, "appsettings.json");
-	var settings = File.Exists(path) ? JsonNode.Parse(File.ReadAllText(path))!.AsObject() : new JsonObject();
-	settings["Keycloak"] = keycloak;
-	File.WriteAllText(path, settings.ToJsonString(new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
-
-	// Exit code 3 asks the bridge to restart us, so the new config is loaded. Graceful shutdown
-	// finishes this response first.
-	Environment.ExitCode = 3;
-	app.Lifetime.StopApplication();
-	return Results.Ok();
-});
-
-// Always this address, whatever --urls or ASPNETCORE_URLS say: the bridge opens the sign-in page
-// here, and the Tidecloak client allows it as a redirect URI. 127.0.0.1 only, so it isn't reachable
-// from other machines.
-// The bridge waits for this exact stdout line to know *this* process holds the port. ApplicationStarted
-// fires only after Kestrel has bound it; if the port is taken, Run throws and the process exits instead.
-app.Lifetime.ApplicationStarted.Register(() => Console.WriteLine("VAULT_STATUS:" + status));
-app.Run("http://127.0.0.1:18433");
-
-// [Authorize] // a valid DPoP-bound user token
-// [RequireExchangeApproval] // and the user's delegation to this backend - answers 401 + challenge until tidecloak-js signs it
-// [ApiController]
-// [Route("exchange")]
-// public class ExchangeController(IAspAsgardService asgard) : ControllerBase
-// {
-// 	// exchanges the user's token with TideCloak over mTLS - the new token is bound to this backend's certificate (cnf.x5t#S256)
-// 	[HttpGet]
-// 	public Task<string> Get() => asgard.ExchangeContextTokenForApplicationToken();
-// }
+// The /Provide/Adaptor body. MVC matches "vault" and "bridge" to these names regardless of case.
+public record AdaptorConfigs(JsonObject? Vault, JsonObject? Bridge);

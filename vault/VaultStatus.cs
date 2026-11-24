@@ -1,4 +1,4 @@
-internal enum VaultStatus
+public enum VaultStatus
 {
     NotRunning,
     AdaptorRequired,

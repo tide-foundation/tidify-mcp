@@ -1,9 +1,7 @@
-import { acceptedContent, inputRequired, inputResponse, type McpServer } from '@modelcontextprotocol/server';
-import z from 'zod';
-import { once } from 'node:events';
-import type { AddressInfo } from 'node:net';
+import { type McpServer } from '@modelcontextprotocol/server';
 import { openInBrowser } from '../browser.ts';
 import { getVaultState, VaultState } from '../vault-management/vault-state.ts';
+import { getLoginAdaptor } from '../vault-management/asgard-server-setup.ts';
 
 const url = process.env.TIDECLOAK_URL ?? 'http://localhost:8080';
 const realm = process.env.TIDECLOAK_REALM ?? 'a';
@@ -21,23 +19,24 @@ export function registerLoginTool(server: McpServer): void {
             const state = getVaultState();
             if (state === VaultState.NotRunning) throw new Error('The Asgard proxy is still starting. Try again in a few seconds.');
 
-            switch(state){
+            switch (state) {
                 case VaultState.AdaptorRequired:
+                case VaultState.Running: {
+                    const adaptor = getLoginAdaptor();
+                    const page = new URL(`http://127.0.0.1:${18433}/`);
+                    page.search = new URLSearchParams({
+                        url, realm, clientId: client,
+                        fetchAdaptor: String(state === VaultState.AdaptorRequired),
+                        provideDelegation: String(state === VaultState.Running),
+                        ...(adaptor ? { loginAdaptor: Buffer.from(JSON.stringify(adaptor), 'utf8').toString('base64url') } : {})
+                    }).toString();
+                    await openInBrowser(page.href);
                     break;
+                }
                 case VaultState.CertificateApprovalRequired:
-                    break;
-                case VaultState.Running:
-                    break;
+                    throw new Error("Admin must first approve certificate used by the vault service");
                 default:
                     throw new Error("Unhandled state type: " + state);
-            }
-
-            try {
-                const page = new URL(`http://127.0.0.1:${18433}/`);
-                page.search = new URLSearchParams({ url, realm, clientId: client, fetchAdaptor: 'true' }).toString();
-                await openInBrowser(page.href);
-            }finally{
-
             }
 
             return { content: [{ type: 'text', text: `Logged into ${realm}.` }] };

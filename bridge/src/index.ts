@@ -10,14 +10,6 @@ import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { SERVER_NAME, SERVER_VERSION } from './info.ts';
 import { createServer } from './server.ts';
 import { startVault } from './vault-management/asgard-server-setup.ts';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-
-// TEMP: persistence test
-if (existsSync('hello.txt')) console.error(`[${SERVER_NAME}] hello.txt: ${readFileSync('hello.txt', 'utf8')}`);
-else writeFileSync('hello.txt', `hello ${new Date().toISOString()}`);
-
-
-
 
 // ensure asgard sever is set up first
 // Builds and starts the vault in the background, so a slow build can't time out the MCP client's

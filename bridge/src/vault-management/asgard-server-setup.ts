@@ -1,6 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
+import { readFileSync } from 'node:fs';
 import type { Socket } from 'node:net';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { SERVER_NAME } from '../info.ts';
@@ -13,12 +15,17 @@ export const VAULT_URL = 'http://127.0.0.1:18433/';
 const VAULT_DIR = fileURLToPath(new URL('../../../vault/', import.meta.url));
 // Where `dotnet build` puts the app: Debug configuration, the csproj's TargetFramework.
 const VAULT_DLL = 'bin/Debug/net10.0/Asgard.Vault.dll';
-/** The line vault/Program.cs prints on stdout once it has bound VAULT_URL's port. */
-const STATUS_MARKER = 'VAULT_STATUS';
+/**
+ * Starts the status lines vault/Program.cs prints on stdout, e.g. `VAULT_STATUS:Running`: the first once it has
+ * bound VAULT_URL's port, then one each time its status changes.
+ */
+const STATUS_MARKER = 'VAULT_STATUS:';
 /** The message vault/Program.cs throws when it has no Keycloak config (no appsettings.json yet). */
 const MISSING_CONFIG = 'No Keycloak realm configuration found.';
-/** The exit code vault/Program.cs uses to ask for a restart (after /adaptor writes appsettings.json). */
+/** The exit code vault/Program.cs uses to ask for a restart (after /Provide/Adaptor writes appsettings.json). */
 const RESTART_EXIT_CODE = 3;
+/** The appsettings.json section vault/Program.cs saves the browser client's adapter config under. */
+const LOGIN_ADAPTOR_SECTION = 'BrowserClient';
 const browserClientId = process.env.TIDECLOAK_CLIENT_ID ?? 'browser_login';
 
 let vault: ChildProcess | undefined;
@@ -41,6 +48,24 @@ async function run(): Promise<void> {
     // However the bridge exits (stdin closed, or SIGINT/SIGTERM in index.ts), stop the vault with it.
     process.once('exit', () => vault?.kill());
     launch(false);
+}
+
+/**
+ * The browser client's adapter config, from the section vault/Program.cs's /Provide/Adaptor saves it under in
+ * the vault's appsettings.json. Undefined until the first sign-in has saved it: the file may not exist yet, or
+ * may only hold other sections.
+ */
+export function getLoginAdaptor(): any | undefined {
+    let text: string;
+    try {
+        text = readFileSync(join(VAULT_DIR, 'appsettings.json'), 'utf8');
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+        throw error; // exists but can't be read, e.g. permissions
+    }
+    // JSON.parse throws on a malformed file: that's a broken config, not a missing one.
+    const section = JSON.parse(text)?.[LOGIN_ADAPTOR_SECTION];
+    return typeof section === 'object' && section !== null && !Array.isArray(section) ? section : undefined;
 }
 
 /**
@@ -72,22 +97,24 @@ function launch(withDefaults: boolean): void {
     let missingConfig = false;
     createInterface({ input: vault.stderr! }).on('line', line => {
         if (line.includes(MISSING_CONFIG)) missingConfig = true;
-        process.stderr.write(line + '\n');
+        process.stderr.write("[vault] " + line + '\n');
     });
 
     // Readiness comes from the vault itself, not from probing the port: if another service already
     // holds 18433, a probe would get that service's answer, while the vault fails to bind and exits.
     createInterface({ input: vault.stdout! }).on('line', line => {
-        if (getVaultState() === VaultState.NotRunning && line.startsWith(STATUS_MARKER)) {
-            try {
-                console.error(line.substring(STATUS_MARKER.length + 1))
-                setVaultState(parseVaultState(line.substring(STATUS_MARKER.length + 1)));
-                console.error(`[${SERVER_NAME}] The vault is listening on ${VAULT_URL}`);
-            } catch (error) {
-                console.error(`[${SERVER_NAME}] Bad vault status line "${line}":`, error);
-            }
-        } else {
-            process.stderr.write(line + '\n');
+        if (!line.startsWith(STATUS_MARKER)) {
+            process.stderr.write("[vault] " + line + '\n');
+            return;
+        }
+        const name = line.slice(STATUS_MARKER.length);
+        try {
+            const state = parseVaultState(name);
+            if (getVaultState() === VaultState.NotRunning) console.error(`[${SERVER_NAME}] The vault is listening on ${VAULT_URL}`);
+            setVaultState(state);
+            console.error(`[${SERVER_NAME}] Vault status: ${name}`);
+        } catch (error) {
+            console.error(`[${SERVER_NAME}] Bad vault status line "${line}":`, error);
         }
     });
     vault.once('error', error => console.error(`[${SERVER_NAME}] The vault failed to start:`, error));
