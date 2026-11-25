@@ -1,13 +1,22 @@
 import { IAMService } from 'https://esm.sh/@tidecloak/js@0.14.46';
 
 const params = new URLSearchParams(location.search);
+// The bridge sends the saved adaptor once, in the URL. Keep it in localStorage and reload without it, so the
+// sign-in never sees it: TideCloak puts the page's URL in the login state, and the enclave's URL carries that
+// state twice, which is too long for it (414).
+if (params.has('loginAdaptor')) {
+	localStorage.setItem('loginAdaptor', params.get('loginAdaptor'));
+	params.delete('loginAdaptor');
+	location.replace(`?${params}`);
+	await new Promise(() => {}); // stop here: everything below runs on the reloaded page
+}
 const config = {
 	url: params.get('url')?.replace(/\/+$/, ''), // the admin API URLs below append /admin/..., so no trailing slash
 	realm: params.get('realm'),
 	clientId: params.get('clientId'),
 	fetchAdaptorForServer: params.get('fetchAdaptor') === 'true',
 	provideDelegation: params.get('provideDelegation') === 'true',
-	loginAdaptor: params.get('loginAdaptor')
+	loginAdaptor: localStorage.getItem('loginAdaptor')
 };
 const status = document.getElementById('status');
 
@@ -29,7 +38,7 @@ IAMService
 	.init(loginAdaptor, {
 		onLoad: 'login-required',
 		checkLoginIframe: false,
-		redirectUri: `${location.origin}${location.pathname}${location.search}`,
+		redirectUri: `${location.origin}${location.pathname}${location.search}`, // without loginAdaptor, see the top
 		dpopConfig: {
 			mode: 'auto'
 		}
@@ -107,4 +116,7 @@ IAMService
 	.catch(error => {
 		// A failed init also drops IAMService's TideCloak instance, so getToken() would throw from here on.
 		status.textContent = `Sign-in failed: ${error instanceof Error ? error.message : JSON.stringify(error)}`;
-	});
+	})
+	// localStorage outlives the tab, so drop the adaptor once this sign-in is over: a later visit without one
+	// mustn't pick up a stale copy. A redirect away (to sign in) never gets here, so it's kept for the return.
+	.finally(() => localStorage.removeItem('loginAdaptor'));

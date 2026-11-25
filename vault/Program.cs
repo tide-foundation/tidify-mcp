@@ -49,7 +49,9 @@ var app = builder.Build();
 
 app.UseExceptionHandler(); // Asgard reports its errors through it
 app.UseDefaultFiles(); // "/" -> wwwroot/index.html
-app.UseStaticFiles(); // serves wwwroot/ publicly, before any auth middleware runs
+// Serves wwwroot/ publicly, before any auth middleware runs. no-cache makes browsers check back every time (a cheap
+// 304 when unchanged) instead of reusing an old copy, which ran a new app.js against an old index.html.
+app.UseStaticFiles(new StaticFileOptions { OnPrepareResponse = context => context.Context.Response.Headers.CacheControl = "no-cache" });
 app.UseTide_over_DPoP(builder.Configuration, browserClientId);
 app.UseAuthentication();
 app.UseAuthorization();
