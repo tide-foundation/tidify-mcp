@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Http.Features;
 
 /// <summary>
@@ -7,7 +8,11 @@ using Microsoft.AspNetCore.Http.Features;
 /// The MCP server's domain is flattened into one label: each "." becomes "-", and a real "-" is written "--"
 /// (my-server.com -> my--server-com). The proxy domain (here agentproxy.tideprotocol.com) comes from the ProxyDomain
 /// argument, so the proxy knows where the flattened label ends. The client's headers go along, token included, and the server's answer streams back as it
-/// arrives, so SSE works. Requests for any other host (e.g. the proxy domain itself) go on to the rest of the app.
+/// arrives, so SSE works.
+/// OAuth discovery is rewritten to name the proxied address instead of the server's own (WWW-Authenticate's
+/// resource_metadata, and "resource" in /.well-known/oauth-protected-resource), because MCP clients reject metadata whose
+/// resource isn't the URL they connected to. The login itself still goes to the server's authorization server.
+/// Requests for any other host (e.g. the proxy domain itself) go on to the rest of the app.
 /// </summary>
 public class McpProxyMiddleware(RequestDelegate next, string proxyDomain)
 {
@@ -58,12 +63,23 @@ public class McpProxyMiddleware(RequestDelegate next, string proxyDomain)
 			return;
 		}
 
+		// "https://amb.tideprotocol.com" -> "https://amb-tideprotocol-com.agentproxy.tideprotocol.com", as the client sees it.
+		// A TLS-terminating front (nginx, cloudflare) says the scheme in X-Forwarded-Proto; without one, assume https.
+		var serverOrigin = $"https://{target.Authority}";
+		var publicOrigin = $"{context.Request.Headers["X-Forwarded-Proto"].FirstOrDefault() ?? "https"}://{context.Request.Host}";
+		string ToPublic(string value) => value.Replace(serverOrigin, publicOrigin, StringComparison.OrdinalIgnoreCase);
+
+		// "/.well-known/oauth-protected-resource" and "/.well-known/oauth-protected-resource/mcp"
+		var isResourceMetadata = context.Request.Path.StartsWithSegments("/.well-known/oauth-protected-resource");
+
 		using var request = new HttpRequestMessage(new HttpMethod(context.Request.Method), target);
 		if (context.Features.Get<IHttpRequestBodyDetectionFeature>()?.CanHaveBody == true)
 			request.Content = new StreamContent(context.Request.Body);
 		foreach (var (name, values) in context.Request.Headers)
 		{
 			if (HopByHop.Contains(name)) continue;
+			// The resource metadata is read and rewritten here, so ask for it uncompressed
+			if (isResourceMetadata && name.Equals("Accept-Encoding", StringComparison.OrdinalIgnoreCase)) continue;
 			// Authorization, Mcp-Session-Id, Accept... go on the request. Content-Type and Content-Length go on its body.
 			if (!request.Headers.TryAddWithoutValidation(name, values.ToArray()))
 				request.Content?.Headers.TryAddWithoutValidation(name, values.ToArray());
@@ -87,7 +103,32 @@ public class McpProxyMiddleware(RequestDelegate next, string proxyDomain)
 			context.Response.StatusCode = (int)response.StatusCode;
 			// WWW-Authenticate, Mcp-Session-Id, Content-Type... all come back to the client
 			foreach (var (name, values) in response.Headers.Concat(response.Content.Headers))
-				if (!HopByHop.Contains(name)) context.Response.Headers[name] = values.ToArray();
+			{
+				if (HopByHop.Contains(name)) continue;
+				// Bearer resource_metadata="https://amb.tideprotocol.com/..." -> the proxied address, so discovery comes back through here
+				context.Response.Headers[name] = name.Equals("WWW-Authenticate", StringComparison.OrdinalIgnoreCase)
+					? values.Select(ToPublic).ToArray() : values.ToArray();
+			}
+
+			// {"resource":"https://amb.tideprotocol.com/mcp", "authorization_servers":[...]} -> resource on the proxied address.
+			// authorization_servers is left alone: the login still happens at the server's own authorization server.
+			if (isResourceMetadata && response.IsSuccessStatusCode)
+			{
+				var body = await response.Content.ReadAsStringAsync(context.RequestAborted);
+				try
+				{
+					if (JsonNode.Parse(body) is JsonObject metadata
+						&& metadata["resource"] is JsonValue resource && resource.TryGetValue<string>(out var resourceUrl))
+					{
+						metadata["resource"] = ToPublic(resourceUrl);
+						body = metadata.ToJsonString();
+					}
+				}
+				catch (System.Text.Json.JsonException) { } // not JSON: passed on as it came
+				context.Response.Headers.ContentLength = null; // the rewritten body has its own length
+				await context.Response.WriteAsync(body, context.RequestAborted);
+				return;
+			}
 
 			// Send each chunk to the client the moment it arrives, which is what SSE needs
 			context.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
