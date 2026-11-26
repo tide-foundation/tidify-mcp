@@ -48,6 +48,10 @@ builder.Services.AddProblemDetails(); // required by UseExceptionHandler
 var app = builder.Build();
 
 app.UseExceptionHandler(); // Asgard reports its errors through it
+// {mcp server domain}.{ProxyDomain} goes to that mcp server - before static files and auth, it has no auth of its own.
+// Off unless the vault is started with --ProxyDomain=<domain>.
+if (builder.Configuration["ProxyDomain"] is { Length: > 0 } proxyDomain)
+	app.UseMiddleware<McpProxyMiddleware>(proxyDomain);
 app.UseDefaultFiles(); // "/" -> wwwroot/index.html
 // Serves wwwroot/ publicly, before any auth middleware runs. no-cache makes browsers check back every time (a cheap
 // 304 when unchanged) instead of reusing an old copy, which ran a new app.js against an old index.html.

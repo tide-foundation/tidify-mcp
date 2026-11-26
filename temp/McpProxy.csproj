@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The vault's own middleware, linked rather than copied, so what's tested here is what the vault runs -->
+    <Compile Include="../vault/McpProxyMiddleware.cs" Link="McpProxyMiddleware.cs" />
+  </ItemGroup>
+
+</Project>
