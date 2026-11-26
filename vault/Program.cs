@@ -43,6 +43,7 @@ static Task StopOnError(AsgardEventContext context)
 }
 
 builder.Services.AddSingleton(status); // the same instance as the local `status`
+builder.Services.AddSingleton<Asgard.Vault.Middleware.McpSessionCache>(); // for AuthenticationMiddleware
 
 builder.Services.AddProblemDetails(); // required by UseExceptionHandler
 

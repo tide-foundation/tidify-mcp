@@ -1,5 +1,4 @@
 using System.Net;
-using System.Net.Sockets;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Http.Features;
 
@@ -11,6 +10,7 @@ namespace Asgard.Vault;
 /// The MCP server's domain is flattened into one label: each "." becomes "-", and a real "-" is written "--"
 /// (my-server.com -> my--server-com). The proxy domain (here agentproxy.tideprotocol.com) comes from the ProxyDomain
 /// argument, so the proxy knows where the flattened label ends.
+/// Its security (who may use it, where it may go, and its limits) is in EnsureProxyAvailability.
 /// </summary>
 public class McpProxyMiddleware(RequestDelegate next, IConfiguration config)
 {
@@ -23,7 +23,9 @@ public class McpProxyMiddleware(RequestDelegate next, IConfiguration config)
 		.Trim()
 		.Trim('.');
 
-	// One client for every server (the middleware is created once). No timeout, because SSE streams stay open.
+	private readonly EnsureProxyAvailability availability = new(config);
+
+	// One client for every server (the middleware is created once).
 	// No redirects, cookies or decompression, so the client gets the server's answer exactly as it was sent.
 	private readonly HttpClient client = new(new SocketsHttpHandler
 	{
@@ -31,11 +33,9 @@ public class McpProxyMiddleware(RequestDelegate next, IConfiguration config)
 		UseCookies = false,
 		AutomaticDecompression = DecompressionMethods.None,
 		PooledConnectionLifetime = TimeSpan.FromMinutes(5), // picks up DNS changes
-		ConnectCallback = ConnectToNonLoopback
-	}) { Timeout = Timeout.InfiniteTimeSpan };
-
-	private sealed class LoopbackTargetException(string host)
-		: Exception($"{host} resolves to a loopback address, which the proxy won't forward to.");
+		ConnectTimeout = EnsureProxyAvailability.ConnectTimeout,
+		ConnectCallback = EnsureProxyAvailability.ConnectToNonLoopback
+	}) { Timeout = EnsureProxyAvailability.ResponseHeadersTimeout };
 
 	public async Task InvokeAsync(HttpContext context)
 	{
@@ -53,17 +53,7 @@ public class McpProxyMiddleware(RequestDelegate next, IConfiguration config)
 		}
 		var flattenedTargetDomain = requestHost[..^(proxyDomain.Length+1)];
 
-		// Ensure the request came from a loopback peer (the nginx proxy in front, on this machine). This is the TCP peer:
-		// no forwarded-headers middleware runs before this, so a client can't fake it with X-Forwarded-For.
-		// "::ffff:127.0.0.1" (IPv4 on a dual-stack socket) is mapped back to 127.0.0.1 first.
-		var peer = context.Connection.RemoteIpAddress;
-		if (peer?.IsIPv4MappedToIPv6 == true) peer = peer.MapToIPv4();
-		if (peer is null || !IPAddress.IsLoopback(peer))
-		{
-			context.Response.StatusCode = StatusCodes.Status403Forbidden;
-			await context.Response.WriteAsync("Proxied requests are only accepted from a loopback peer.");
-			return;
-		}
+		if (await EnsureProxyAvailability.RejectNonLoopbackPeer(context)) return;
 
 		// "amb-tideprotocol-com" -> "amb.tideprotocol.com", "my--server-com" -> "my-server.com".
 		var cleanTargetDomain = flattenedTargetDomain.Contains('.') ? "" : flattenedTargetDomain.Replace("--", "\0").Replace('-', '.').Replace("\0", "-");
@@ -77,6 +67,9 @@ public class McpProxyMiddleware(RequestDelegate next, IConfiguration config)
 			await context.Response.WriteAsync($"An issue was encountered determining the mcp server domain.");
 			return;
 		}
+
+		if (await availability.RejectOverRateLimit(context, targetFullUri.Host)) return;
+		if (await availability.RejectOversizedRequestBody(context)) return;
 
 		// "https://amb.tideprotocol.com" -> "https://amb-tideprotocol-com.agentproxy.tideprotocol.com", as the client sees it.
 		// A TLS-terminating front (nginx, cloudflare) says the scheme in X-Forwarded-Proto; without one, assume https.
@@ -102,14 +95,10 @@ public class McpProxyMiddleware(RequestDelegate next, IConfiguration config)
 			// Returns as soon as the headers arrive, so an SSE body is streamed instead of waited for
 			response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
 		}
-		catch (HttpRequestException error) when (error.InnerException is LoopbackTargetException loopback)
+		catch (Exception error) when (error is HttpRequestException or OperationCanceledException)
 		{
-			context.Response.StatusCode = StatusCodes.Status403Forbidden;
-			await context.Response.WriteAsync(loopback.Message);
-			return;
-		}
-		catch (HttpRequestException error)
-		{
+			if (await availability.RejectSendFailure(context, error, targetFullUri.Host)) return;
+			if (error is not HttpRequestException) throw; // the client went away: nothing to answer
 			context.Response.StatusCode = StatusCodes.Status502BadGateway;
 			await context.Response.WriteAsync($"Couldn't reach {targetFullUri.Host}: {error.Message}");
 			return;
@@ -147,13 +136,12 @@ public class McpProxyMiddleware(RequestDelegate next, IConfiguration config)
 	{
 		if (!IsResourceMetadata(context) || !response.IsSuccessStatusCode)
 		{
-			// Send each chunk to the client the moment it arrives, which is what SSE needs
-			context.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
-			await response.Content.CopyToAsync(context.Response.Body, context.RequestAborted);
+			await StreamBody(context, response);
 			return;
 		}
 
-		var body = await response.Content.ReadAsStringAsync(context.RequestAborted);
+		var body = await EnsureProxyAvailability.ReadBodyOrReject(context, response);
+		if (body is null) return;
 		try
 		{
 			if (JsonNode.Parse(body) is JsonObject metadata
@@ -168,29 +156,12 @@ public class McpProxyMiddleware(RequestDelegate next, IConfiguration config)
 		await context.Response.WriteAsync(body, context.RequestAborted);
 	}
 
-	// Ensure the target is NOT a loopback address: "localhost", or any name that resolves to 127.0.0.0/8 or ::1, would
-	// otherwise reach services on this machine. This runs as the connection is made and connects to exactly the addresses
-	// it checked, so a name that answers differently a moment later (DNS rebinding) can't slip past.
-	private static async ValueTask<Stream> ConnectToNonLoopback(SocketsHttpConnectionContext connection, CancellationToken cancellationToken)
+	// Sends each chunk to the client the moment it arrives, which is what SSE needs
+	private static async Task StreamBody(HttpContext context, HttpResponseMessage response)
 	{
-		var host = connection.DnsEndPoint.Host;
-		var addresses = await Dns.GetHostAddressesAsync(host, cancellationToken);
-		// "::ffff:127.0.0.1" is 127.0.0.1 too
-		if (addresses.Any(address => IPAddress.IsLoopback(address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address)))
-			throw new LoopbackTargetException(host);
-
-		// Dual-mode socket, so it can connect to IPv4 and IPv6 addresses alike
-		var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
-		try
-		{
-			await socket.ConnectAsync(addresses, connection.DnsEndPoint.Port, cancellationToken);
-			return new NetworkStream(socket, ownsSocket: true);
-		}
-		catch
-		{
-			socket.Dispose();
-			throw;
-		}
+		context.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
+		await using var body = await response.Content.ReadAsStreamAsync(context.RequestAborted);
+		await EnsureProxyAvailability.CopyWithIdleTimeout(body, context);
 	}
 
 	// "...https://amb.tideprotocol.com/..." -> "...https://amb-tideprotocol-com.agentproxy.tideprotocol.com/..."

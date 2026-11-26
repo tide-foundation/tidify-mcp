@@ -7,8 +7,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- The vault's own middleware, linked rather than copied, so what's tested here is what the vault runs -->
+    <!-- The vault's own middleware and its security, linked rather than copied, so what's tested here is what the vault runs -->
     <Compile Include="../vault/McpProxyMiddleware.cs" Link="McpProxyMiddleware.cs" />
+    <Compile Include="../vault/EnsureProxyAvailability.cs" Link="EnsureProxyAvailability.cs" />
   </ItemGroup>
 
 </Project>
