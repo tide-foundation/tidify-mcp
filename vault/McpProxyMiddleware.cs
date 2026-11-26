@@ -2,10 +2,11 @@ using System.Net;
 using Microsoft.AspNetCore.Http.Features;
 
 /// <summary>
-/// Forwards a request for {mcp server domain}.{proxy domain} to the MCP server:
-///   https://amb.tideprotocol.com.vault.example.com/mcp?x=1 -> https://amb.tideprotocol.com/mcp?x=1
-/// The proxy domain (here vault.example.com) comes from the ProxyDomain argument, so the proxy knows where the MCP
-/// server's domain ends. The client's headers go along, token included, and the server's answer streams back as it
+/// Forwards a request for {flattened mcp server domain}.{proxy domain} to the MCP server:
+///   https://amb-tideprotocol-com.agentproxy.tideprotocol.com/mcp?x=1 -> https://amb.tideprotocol.com/mcp?x=1
+/// The MCP server's domain is flattened into one label: each "." becomes "-", and a real "-" is written "--"
+/// (my-server.com -> my--server-com). The proxy domain (here agentproxy.tideprotocol.com) comes from the ProxyDomain
+/// argument, so the proxy knows where the flattened label ends. The client's headers go along, token included, and the server's answer streams back as it
 /// arrives, so SSE works. Requests for any other host (e.g. the proxy domain itself) go on to the rest of the app.
 /// </summary>
 public class McpProxyMiddleware(RequestDelegate next, string proxyDomain)
@@ -14,7 +15,7 @@ public class McpProxyMiddleware(RequestDelegate next, string proxyDomain)
 	private static readonly HashSet<string> HopByHop = new(StringComparer.OrdinalIgnoreCase)
 		{ "Host", "Connection", "Keep-Alive", "Transfer-Encoding", "TE", "Upgrade", "Proxy-Connection", "Proxy-Authorization" };
 
-	// ".vault.example.com": what a proxied host ends with
+	// ".agentproxy.tideprotocol.com": what a proxied host ends with
 	private readonly string hostSuffix = "." + proxyDomain.Trim().Trim('.');
 
 	// One client for every server (the middleware is created once). No timeout, because SSE streams stay open.
@@ -34,14 +35,18 @@ public class McpProxyMiddleware(RequestDelegate next, string proxyDomain)
 		foreach (var (name, values) in context.Request.Headers)
 			Console.WriteLine($"  {name}: {values}");
 
-		// "amb.tideprotocol.com.vault.example.com" -> "amb.tideprotocol.com". The port the client used is the proxy's, not the server's.
+		// "amb-tideprotocol-com.agentproxy.tideprotocol.com" -> "amb-tideprotocol-com". The port the client used is the proxy's, not the server's.
 		var host = context.Request.Host.Host;
 		if (!host.EndsWith(hostSuffix, StringComparison.OrdinalIgnoreCase) || host.Length == hostSuffix.Length)
 		{
 			await next(context);
 			return;
 		}
-		var serverName = host[..^hostSuffix.Length];
+		var label = host[..^hostSuffix.Length];
+
+		// "amb-tideprotocol-com" -> "amb.tideprotocol.com", "my--server-com" -> "my-server.com".
+		// A label with a "." in it isn't a flattened domain, so it's left for the check below to turn away.
+		var serverName = label.Contains('.') ? "" : label.Replace("--", "\0").Replace('-', '.').Replace("\0", "-");
 
 		// The server name must be just a host, so it can't smuggle in a port, path, user info or another scheme.
 		if (Uri.CheckHostName(serverName) != UriHostNameType.Dns
@@ -49,7 +54,7 @@ public class McpProxyMiddleware(RequestDelegate next, string proxyDomain)
 			|| !target.Host.Equals(serverName, StringComparison.OrdinalIgnoreCase) || !target.IsDefaultPort)
 		{
 			context.Response.StatusCode = StatusCodes.Status400BadRequest;
-			await context.Response.WriteAsync($"Expected {{mcp server domain}}{hostSuffix} as the host.");
+			await context.Response.WriteAsync($"Expected {{mcp server domain, with \".\" as \"-\" and \"-\" as \"--\"}}{hostSuffix} as the host.");
 			return;
 		}
 
