@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Asgard.Vault;
 using Tide.Asgard.AspNetCore.Authentication;
 using Tide.Asgard.AspNetCore.Authentication.SetupHelpers;
 using Tide.Asgard.AspNetCore.Authentication.TokenExchange;
@@ -50,8 +51,9 @@ var app = builder.Build();
 app.UseExceptionHandler(); // Asgard reports its errors through it
 // {flattened mcp server domain}.{ProxyDomain} (amb-tideprotocol-com.agentproxy...) goes to that mcp server - before static files and auth, it has no auth of its own.
 // Off unless the vault is started with --ProxyDomain=<domain>.
-if (builder.Configuration["ProxyDomain"] is { Length: > 0 } proxyDomain)
-	app.UseMiddleware<McpProxyMiddleware>(proxyDomain);
+// Only from a loopback peer (the nginx in front).
+if (builder.Configuration["ProxyDomain"] is { Length: > 0 })
+	app.UseMiddleware<McpProxyMiddleware>(); // reads ProxyDomain from the configuration itself
 app.UseDefaultFiles(); // "/" -> wwwroot/index.html
 // Serves wwwroot/ publicly, before any auth middleware runs. no-cache makes browsers check back every time (a cheap
 // 304 when unchanged) instead of reusing an old copy, which ran a new app.js against an old index.html.
