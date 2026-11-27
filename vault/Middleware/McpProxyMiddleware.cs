@@ -2,7 +2,7 @@ using System.Net;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Http.Features;
 
-namespace Asgard.Vault;
+namespace Asgard.Vault.Middleware;
 
 /// <summary>
 /// Forwards a request for to the MCP server:
@@ -18,10 +18,18 @@ public class McpProxyMiddleware(RequestDelegate next, IConfiguration config)
 	private static readonly HashSet<string> SkippableHeaders = new(StringComparer.OrdinalIgnoreCase)
 		{ "Host", "Connection", "Keep-Alive", "Transfer-Encoding", "TE", "Upgrade", "Proxy-Connection", "Proxy-Authorization" };
 
-	private readonly string proxyDomain = (config.GetValue<string>("ProxyDomain") 
+	private readonly string proxyDomain = GetProxyDomain(config);
+
+	// The --ProxyDomain argument, without surrounding spaces or dots
+	public static string GetProxyDomain(IConfiguration config) => (config.GetValue<string>("ProxyDomain")
 		?? throw new InvalidOperationException("Missing the proxy domain. Pass it as --ProxyDomain=<domain>"))
 		.Trim()
 		.Trim('.');
+
+	// "amb-tideprotocol-com.agentproxy.tideprotocol.com" is proxied; "agentproxy.tideprotocol.com" itself, and the
+	// vault's own pages, aren't. Program.cs uses it to send only proxied requests down the proxy's pipeline.
+	public static bool IsProxiedHost(string host, string proxyDomain)
+		=> host.EndsWith("." + proxyDomain, StringComparison.OrdinalIgnoreCase);
 
 	private readonly EnsureProxyAvailability availability = new(config);
 
@@ -46,14 +54,12 @@ public class McpProxyMiddleware(RequestDelegate next, IConfiguration config)
 
 		// "amb-tideprotocol-com.agentproxy.tideprotocol.com" -> "amb-tideprotocol-com". The port the client used is the proxy's, not the server's.
 		var requestHost = context.Request.Host.Host;
-		if (!requestHost.EndsWith("." + proxyDomain, StringComparison.OrdinalIgnoreCase) || requestHost.Length == proxyDomain.Length)
+		if (!IsProxiedHost(requestHost, proxyDomain))
 		{
 			await next(context);
 			return;
 		}
 		var flattenedTargetDomain = requestHost[..^(proxyDomain.Length+1)];
-
-		if (await EnsureProxyAvailability.RejectNonLoopbackPeer(context)) return;
 
 		// "amb-tideprotocol-com" -> "amb.tideprotocol.com", "my--server-com" -> "my-server.com".
 		var cleanTargetDomain = flattenedTargetDomain.Contains('.') ? "" : flattenedTargetDomain.Replace("--", "\0").Replace('-', '.').Replace("\0", "-");
@@ -69,7 +75,6 @@ public class McpProxyMiddleware(RequestDelegate next, IConfiguration config)
 		}
 
 		if (await availability.RejectOverRateLimit(context, targetFullUri.Host)) return;
-		if (await availability.RejectOversizedRequestBody(context)) return;
 
 		// "https://amb.tideprotocol.com" -> "https://amb-tideprotocol-com.agentproxy.tideprotocol.com", as the client sees it.
 		// A TLS-terminating front (nginx, cloudflare) says the scheme in X-Forwarded-Proto; without one, assume https.

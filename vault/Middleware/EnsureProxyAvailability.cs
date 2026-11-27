@@ -3,7 +3,7 @@ using System.Net.Sockets;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Http.Features;
 
-namespace Asgard.Vault;
+namespace Asgard.Vault.Middleware;
 
 /// <summary>
 /// McpProxyMiddleware's security: who may use it, where it may go, and DoS limits.
@@ -40,12 +40,6 @@ public class EnsureProxyAvailability(IConfiguration config)
 
 	private sealed class LoopbackTargetException(string host)
 		: Exception($"{host} resolves to a loopback address, which the proxy won't forward to.");
-
-	// Only the nginx in front, on this machine. The TCP peer, so X-Forwarded-For can't fake it.
-	public static Task<bool> RejectNonLoopbackPeer(HttpContext context)
-		=> context.Connection.RemoteIpAddress is { } peer && IsLoopback(peer)
-			? Task.FromResult(false)
-			: Reject(context, StatusCodes.Status403Forbidden, "Proxied requests are only accepted from a loopback peer.");
 
 	public Task<bool> RejectOverRateLimit(HttpContext context, string server)
 	{
@@ -139,8 +133,8 @@ public class EnsureProxyAvailability(IConfiguration config)
 		}
 	}
 
-	// Also counts "::ffff:127.0.0.1"
-	private static bool IsLoopback(IPAddress address)
+	// Also counts "::ffff:127.0.0.1". Also used by LoopbackPeerMiddleware.
+	public static bool IsLoopback(IPAddress address)
 		=> IPAddress.IsLoopback(address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address);
 
 	private static async Task<bool> Reject(HttpContext context, int statusCode, string message)

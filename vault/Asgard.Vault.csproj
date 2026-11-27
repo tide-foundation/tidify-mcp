@@ -11,6 +11,8 @@
   <ItemGroup>
     <!-- local checkout at ~/asgard, instead of the Tide.Asgard.AspNetCore.Authentication NuGet package -->
     <ProjectReference Include="..\..\asgard\aspnet\Tide.Asgard.AspNetCore\Tide.Asgard.AspNetCore\Tide.Asgard.AspNetCore.Authentication.csproj" />
+    <!-- AsgardSettings lives here; the SDK references it with PrivateAssets="all", so it doesn't flow through -->
+    <ProjectReference Include="..\..\asgard\aspnet\Tide.Asgard.AspNetCore\Tide.Asgard.Core\Tide.Asgard.Core.csproj" />
   </ItemGroup>
 
 </Project>
