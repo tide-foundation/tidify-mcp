@@ -61,6 +61,7 @@ if (builder.Configuration["ProxyDomain"] is { Length: > 0 })
 	var proxyDomain = McpProxyMiddleware.GetProxyDomain(builder.Configuration);
 	app.MapWhen(context => McpProxyMiddleware.IsProxiedHost(context.Request.Host.Host, proxyDomain), proxied => proxied
 		.UseMiddleware<LoopbackPeerMiddleware>()
+		.UseMiddleware<AllowedMcpServerMiddleware>() // reads AllowedMcpServers from the configuration
 		.UseMiddleware<McpProxyAuthenticationMiddleware>()
 		.UseMiddleware<McpProxyMiddleware>()); // reads ProxyDomain from the configuration itself
 }
