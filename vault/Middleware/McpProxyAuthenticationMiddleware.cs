@@ -56,26 +56,34 @@ public class McpProxyAuthenticationMiddleware(RequestDelegate next, McpSessionCa
 		}
 		var key = new McpSessionKey(claims.Issuer, claims.Subject, context.Request.Host.Host.ToLowerInvariant());
 		var session = cache.Get(key);
+		var tokenHash = McpSessionCache.HashToken(token);
 
-        if(session is null)
-        {
-			// get the user to log into this proxy by providing their delegation
- 			await RequireLogin(context, key, token, claims, false);
-            return;
-        }
+		// No session (a first request), or a token the session hasn't seen (a refresh, another client): let it through,
+		// and record it only once the MCP server accepts it. A forged token gets the server's 401, so it leaves nothing
+		// behind and never sees a login code.
+		if (session is null || !session.HasToken(tokenHash))
+		{
+			// Fail closed: with the pending cache full, a first request can't get a session, so every request after it
+			// would be a first request again and pass without a login
+			if (session is null && cache.PendingIsFull)
+			{
+				context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+				context.Response.Headers.RetryAfter = "60";
+				await context.Response.WriteAsync("The proxy has too many logins in progress. Try again in a minute.");
+				return;
+			}
 
-		if (session.HasDelegation() is false)
-        {
-            // get the user to log into this proxy by providing their delegation
- 			await RequireLogin(context, key, token, claims, true);
-            return;
-        }
+			CaptureTargetMcpAuthentication(context, key, tokenHash, claims.ExpiresAt);
+			await next(context);
+			return;
+		}
 
-        if (session.HasToken(McpSessionCache.HashToken(token)) is false)
-        {
-            // unknown token, wait until response comes back with 200 to add them
-            CaptureTargetMcpAuthentication(context, session, token, claims);
-        }
+		// A token the MCP server has accepted, but the user hasn't logged in to the proxy yet
+		if (!session.HasDelegation())
+		{
+			await RequireLogin(context, session);
+			return;
+		}
 
 		await next(context);
 	}
@@ -83,35 +91,27 @@ public class McpProxyAuthenticationMiddleware(RequestDelegate next, McpSessionCa
 	// Records the token in the session once the MCP server accepts it: a 2xx from its protected /mcp path. The proxy
 	// can't verify the token, so the server's answer is the only proof it isn't forged. Runs as the response headers
 	// go out, so an SSE stream counts as soon as it opens, and a request that fails before then counts for nothing.
-	private static void CaptureTargetMcpAuthentication(HttpContext context, McpSession session, string token, TokenClaims claims)
+	// The token joins its session, or for a first request starts a pending one (which gets the login code).
+	private void CaptureTargetMcpAuthentication(HttpContext context, McpSessionKey key, string tokenHash, DateTimeOffset expiresAt)
 	{
 		if (!context.Request.Path.StartsWithSegments("/mcp")) return; // other paths may answer 2xx without checking the token
 
-		var tokenHash = McpSessionCache.HashToken(token);
 		context.Response.OnStarting(() =>
 		{
 			if (context.Response.StatusCode is >= 200 and < 300)
-				session.AddToken(tokenHash, claims.ExpiresAt);
+			{
+				// Looked up again: a request alongside this one may have created the session meanwhile
+				if (cache.Get(key) is { } session) session.AddToken(tokenHash, expiresAt);
+				else cache.CreatePending(key, tokenHash, expiresAt); // null when full: the next request is a first one again
+			}
 			return Task.CompletedTask;
 		});
 	}
 
-	// Starts the login process: a pending session holding this first token, and an MCP error pointing the user at the login page
-	private async Task RequireLogin(HttpContext context, McpSessionKey key, string token, TokenClaims claims, bool sessionAlreadyExists)
+	// Answers with an MCP error pointing the user at the login page, with the session's login code. Only for a token
+	// the session already holds, so the code only goes to someone the MCP server has accepted.
+	private async Task RequireLogin(HttpContext context, McpSession session)
 	{
-		// The existing session keeps its login code; a new one is pending. Null when the pending cache is full (or the
-		// session expired a moment ago).
-		var session = sessionAlreadyExists
-			? cache.Get(key)
-			: cache.CreatePending(key, McpSessionCache.HashToken(token), claims.ExpiresAt);
-		if (session is null)
-		{
-			context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-			context.Response.Headers.RetryAfter = "60";
-			await context.Response.WriteAsync("The proxy has too many logins in progress. Try again in a minute.");
-			return;
-		}
-
 		var loginUrl = "http://127.0.0.1:18433/" + QueryString.Create(new Dictionary<string, string?>
 		{
 			["realm"] = asgardSettings.RealmName,

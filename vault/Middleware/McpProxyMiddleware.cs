@@ -31,6 +31,15 @@ public class McpProxyMiddleware(RequestDelegate next, IConfiguration config)
 	public static bool IsProxiedHost(string host, string proxyDomain)
 		=> host.EndsWith("." + proxyDomain, StringComparison.OrdinalIgnoreCase);
 
+	// A proxied host's MCP server: "amb-tideprotocol-com.agentproxy.tideprotocol.com" -> "amb.tideprotocol.com",
+	// "my--server-com.agentproxy..." -> "my-server.com". "" when the flattened part has a "." (more than one label).
+	// Not validated as a host name yet: InvokeAsync does that.
+	public static string GetTargetDomain(string proxiedHost, string proxyDomain)
+	{
+		var flattenedTargetDomain = proxiedHost[..^(proxyDomain.Length + 1)];
+		return flattenedTargetDomain.Contains('.') ? "" : flattenedTargetDomain.Replace("--", "\0").Replace('-', '.').Replace("\0", "-");
+	}
+
 	private readonly EnsureProxyAvailability availability = new(config);
 
 	// One client for every server (the middleware is created once).
@@ -59,10 +68,7 @@ public class McpProxyMiddleware(RequestDelegate next, IConfiguration config)
 			await next(context);
 			return;
 		}
-		var flattenedTargetDomain = requestHost[..^(proxyDomain.Length+1)];
-
-		// "amb-tideprotocol-com" -> "amb.tideprotocol.com", "my--server-com" -> "my-server.com".
-		var cleanTargetDomain = flattenedTargetDomain.Contains('.') ? "" : flattenedTargetDomain.Replace("--", "\0").Replace('-', '.').Replace("\0", "-");
+		var cleanTargetDomain = GetTargetDomain(requestHost, proxyDomain);
 
 		// The server name must be just a host, so it can't smuggle in a port, path, user info or another scheme.
 		if (Uri.CheckHostName(cleanTargetDomain) != UriHostNameType.Dns

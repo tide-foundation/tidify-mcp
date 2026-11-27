@@ -91,6 +91,9 @@ public sealed class McpSessionCache : IDisposable
 	public McpSession? Get(McpSessionKey key)
 		=> sessions.Get<McpSession>(key) ?? pending.Get<McpSession>(key);
 
+	// No room for another pending session (each takes two entries: the session and its login code)
+	public bool PendingIsFull => pending.Count >= MaxPendingSessions * 2;
+
 	public McpSession? GetByLoginCode(string loginCode)
 		=> pending.Get<McpSessionKey>(LoginCodeKey(loginCode)) is { } key ? pending.Get<McpSession>(key) : null;
 
