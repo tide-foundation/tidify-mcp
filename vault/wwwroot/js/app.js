@@ -1,5 +1,18 @@
 import { IAMService } from 'https://esm.sh/@tidecloak/js@0.14.46';
 
+// =====================================================================================================================
+// TODO SECURITY - FIX BEFORE THE PROXY USES DELEGATIONS: LOGIN CSRF / SESSION FIXATION THROUGH loginCode
+//
+// The loginCode in this page's URL decides which proxy session the delegation made here is attached to, and nothing
+// checks that the person logging in is the one that session belongs to. An attacker with their own valid account
+// at an allowed MCP server can:
+//   1. connect through the proxy and get the login error, with a URL carrying THEIR session's loginCode,
+//   2. get a victim to open that URL (a link in an email, a chat, an issue...),
+//   3. the victim logs in here, and the victim's delegation is attached to the ATTACKER's session.
+// From then on, the attacker's MCP client goes through the proxy carrying the victim's delegation.
+// Harmless while the delegation only marks a session as logged in. Serious as soon as the proxy acts with it.
+// =====================================================================================================================
+
 const params = new URLSearchParams(location.search);
 // The bridge sends the saved adaptor once, in the URL. Keep it in localStorage and reload without it, so the
 // sign-in never sees it: TideCloak puts the page's URL in the login state, and the enclave's URL carries that
