@@ -95,6 +95,9 @@ public class McpProxyAuthenticationMiddleware(RequestDelegate next, McpSessionCa
 	private void CaptureTargetMcpAuthentication(HttpContext context, McpSessionKey key, string tokenHash, DateTimeOffset expiresAt)
 	{
 		if (!context.Request.Path.StartsWithSegments("/mcp")) return; // other paths may answer 2xx without checking the token
+		// Only a POST (a JSON-RPC call) counts. An OPTIONS preflight is often answered 204 before the server checks the
+		// token, which would let a forged token (with someone else's iss and sub) in and hand it their login code.
+		if (!HttpMethods.IsPost(context.Request.Method)) return;
 
 		context.Response.OnStarting(() =>
 		{
