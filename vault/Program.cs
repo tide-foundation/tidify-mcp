@@ -58,12 +58,12 @@ app.UseExceptionHandler(); // Asgard reports its errors through it
 // and the response status after.
 if (builder.Configuration["ProxyDomain"] is { Length: > 0 })
 {
-	var proxyDomain = McpProxyMiddleware.GetProxyDomain(builder.Configuration);
-	app.MapWhen(context => McpProxyMiddleware.IsProxiedHost(context.Request.Host.Host, proxyDomain), proxied => proxied
+	var proxyDomain = McpProxyForwardingMiddleware.GetProxyDomain(builder.Configuration);
+	app.MapWhen(context => McpProxyForwardingMiddleware.IsProxiedHost(context.Request.Host.Host, proxyDomain), proxied => proxied
 		.UseMiddleware<LoopbackPeerMiddleware>()
 		.UseMiddleware<AllowedMcpServerMiddleware>() // reads AllowedMcpServers from the configuration
 		.UseMiddleware<McpProxyAuthenticationMiddleware>()
-		.UseMiddleware<McpProxyMiddleware>()); // reads ProxyDomain from the configuration itself
+		.UseMiddleware<McpProxyForwardingMiddleware>()); // reads ProxyDomain from the configuration itself
 }
 app.UseDefaultFiles(); // "/" -> wwwroot/index.html
 // Serves wwwroot/ publicly, before any auth middleware runs. no-cache makes browsers check back every time (a cheap

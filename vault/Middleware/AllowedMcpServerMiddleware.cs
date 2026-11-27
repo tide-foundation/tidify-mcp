@@ -8,7 +8,7 @@ namespace Asgard.Vault.Middleware;
 /// </summary>
 public class AllowedMcpServerMiddleware(RequestDelegate next, IConfiguration config)
 {
-	private readonly string proxyDomain = McpProxyMiddleware.GetProxyDomain(config);
+	private readonly string proxyDomain = McpProxyForwardingMiddleware.GetProxyDomain(config);
 
 	private readonly HashSet<string> allowedServers = config.GetSection("AllowedMcpServers").Get<string[]>()?
 		.Select(server => server.Trim().TrimEnd('.'))
@@ -19,7 +19,7 @@ public class AllowedMcpServerMiddleware(RequestDelegate next, IConfiguration con
 
 	public async Task InvokeAsync(HttpContext context)
 	{
-		var server = McpProxyMiddleware.GetTargetDomain(context.Request.Host.Host, proxyDomain);
+		var server = McpProxyForwardingMiddleware.GetTargetDomain(context.Request.Host.Host, proxyDomain);
 		if (!allowedServers.Contains(server))
 		{
 			context.Response.StatusCode = StatusCodes.Status403Forbidden;

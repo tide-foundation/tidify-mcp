@@ -12,7 +12,7 @@ namespace Asgard.Vault.Middleware;
 /// argument, so the proxy knows where the flattened label ends.
 /// Its security (who may use it, where it may go, and its limits) is in EnsureProxyAvailability.
 /// </summary>
-public class McpProxyMiddleware(RequestDelegate next, IConfiguration config)
+public class McpProxyForwardingMiddleware(RequestDelegate next, IConfiguration config)
 {
 	// Headers about this one connection (or meant for the proxy itself): not passed on in either direction
 	private static readonly HashSet<string> SkippableHeaders = new(StringComparer.OrdinalIgnoreCase)
@@ -90,14 +90,14 @@ public class McpProxyMiddleware(RequestDelegate next, IConfiguration config)
 		using var request = new HttpRequestMessage(new HttpMethod(context.Request.Method), targetFullUri);
 		if (context.Features.Get<IHttpRequestBodyDetectionFeature>()?.CanHaveBody == true)
 			request.Content = new StreamContent(context.Request.Body);
-		foreach (var (name, values) in context.Request.Headers)
+		foreach (var (header, values) in context.Request.Headers)
 		{
-			if (SkippableHeaders.Contains(name)) continue;
+			if (SkippableHeaders.Contains(header)) continue;
 			// The resource metadata is read and rewritten here, so ask for it uncompressed
-			if (IsResourceMetadata(context) && name.Equals("Accept-Encoding", StringComparison.OrdinalIgnoreCase)) continue;
+			if (IsResourceMetadata(context) && header.Equals("Accept-Encoding", StringComparison.OrdinalIgnoreCase)) continue;
 			// Authorization, Mcp-Session-Id, Accept... go on the request. Content-Type and Content-Length go on its body.
-			if (!request.Headers.TryAddWithoutValidation(name, values.ToArray()))
-				request.Content?.Headers.TryAddWithoutValidation(name, values.ToArray());
+			if (!request.Headers.TryAddWithoutValidation(header, values.ToArray()))
+				request.Content?.Headers.TryAddWithoutValidation(header, values.ToArray());
 		}
 
 		HttpResponseMessage response;
